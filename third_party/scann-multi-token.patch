@@ -1,0 +1,564 @@
+diff --git a/scann/pyproject.toml b/scann/pyproject.toml
+index 52d3e9b..27934f7 100644
+--- a/scann/pyproject.toml
++++ b/scann/pyproject.toml
+@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
+ 
+ [project]
+ name = "scann"
+-version = "1.4.2"
++version = "1.4.2+qa1"
+ authors = [
+   { name = "Google Inc.", email = "opensource@google.com" },
+ ]
+diff --git a/scann/scann/base/internal/tree_x_hybrid_factory.cc b/scann/scann/base/internal/tree_x_hybrid_factory.cc
+index b46b06f..54cb926 100644
+--- a/scann/scann/base/internal/tree_x_hybrid_factory.cc
++++ b/scann/scann/base/internal/tree_x_hybrid_factory.cc
+@@ -222,10 +222,10 @@ Status SetOverretrievalFactor(const PartitioningConfig& pconfig,
+   if (pconfig.database_spilling().has_overretrieve_factor()) {
+     const float overretrieve_factor =
+         pconfig.database_spilling().overretrieve_factor();
+-    if (!(overretrieve_factor >= 1.0f && overretrieve_factor <= 2.0f)) {
++    if (!(overretrieve_factor >= 1.0f && std::isfinite(overretrieve_factor))) {
+       return InvalidArgumentError(
+           absl::StrCat("Invalid overretrieve factor: ", overretrieve_factor,
+-                       " is out of range [1.0, 2.0]."));
++                       " is out of range [1.0, inf)."));
+     }
+     searcher->set_spilling_overretrieve_factor(
+         pconfig.database_spilling().overretrieve_factor());
+@@ -390,6 +390,7 @@ StatusOrSearcherUntyped TreeAhHybridResidualFactory<float>(
+       std::move(ah_model), std::move(datapoints_by_token),
+       {.hashed_dataset = opts->hashed_dataset.get(),
+        .soar_hashed_dataset = opts->soar_hashed_dataset.get(),
++       .multi_token_hashed_dataset = opts->multi_token_hashed_dataset.get(),
+        .pool = opts->parallelization_pool.get()}));
+   opts->datapoints_by_token = nullptr;
+   SCANN_RETURN_IF_ERROR(
+diff --git a/scann/scann/base/single_machine_factory_options.h b/scann/scann/base/single_machine_factory_options.h
+index 54031e7..eca6e9f 100644
+--- a/scann/scann/base/single_machine_factory_options.h
++++ b/scann/scann/base/single_machine_factory_options.h
+@@ -21,6 +21,7 @@
+ #include <utility>
+ #include <vector>
+ 
++#include "absl/strings/str_cat.h"
+ #include "scann/data_format/dataset.h"
+ #include "scann/oss_wrappers/scann_threadpool.h"
+ #include "scann/partitioning/partitioner.pb.h"
+@@ -40,6 +41,28 @@ template <typename T>
+ class SingleMachineSearcherBase;
+ class ScannConfig;
+ 
++struct MultiTokenHashedDataset {
++  vector<int64_t> offsets;
++
++  vector<int32_t> tokens;
++
++  unique_ptr<DenseDataset<uint8_t>> codes;
++
++  StatusOr<DatapointPtr<uint8_t>> Get(DatapointIndex dp_idx,
++                                      int32_t token) const {
++    if (dp_idx + 1 >= offsets.size()) {
++      return OutOfRangeError(
++          absl::StrCat("Multi-token datapoint index out of range: ", dp_idx));
++    }
++    for (int64_t j = offsets[dp_idx]; j < offsets[dp_idx + 1]; ++j) {
++      if (tokens[j] == token) return (*codes)[j];
++    }
++    return NotFoundError(absl::StrCat("Datapoint ", dp_idx,
++                                      " has no multi-token code for token ",
++                                      token, "."));
++  }
++};
++
+ struct SingleMachineFactoryOptions {
+   SingleMachineFactoryOptions() = default;
+ 
+@@ -56,6 +79,8 @@ struct SingleMachineFactoryOptions {
+ 
+   shared_ptr<DenseDataset<uint8_t>> soar_hashed_dataset;
+ 
++  shared_ptr<MultiTokenHashedDataset> multi_token_hashed_dataset;
++
+   shared_ptr<DenseDataset<int16_t>> bfloat16_dataset;
+ 
+   std::shared_ptr<CentersForAllSubspaces> ah_codebook;
+diff --git a/scann/scann/scann_ops/cc/scann.cc b/scann/scann/scann_ops/cc/scann.cc
+index 65e0510..2accd89 100644
+--- a/scann/scann/scann_ops/cc/scann.cc
++++ b/scann/scann/scann_ops/cc/scann.cc
+@@ -27,6 +27,7 @@
+ #include "absl/base/internal/sysinfo.h"
+ #include "absl/container/flat_hash_set.h"
+ #include "absl/container/node_hash_set.h"
++#include "absl/strings/str_cat.h"
+ #include "absl/strings/string_view.h"
+ #include "absl/synchronization/mutex.h"
+ #include "scann/base/single_machine_base.h"
+@@ -90,6 +91,85 @@ Status AddTokenizationToOptions(SingleMachineFactoryOptions& opts,
+   return OkStatus();
+ }
+ 
++Status AddMultiTokenizationToOptions(SingleMachineFactoryOptions& opts,
++                                     vector<int32_t> tokens,
++                                     vector<int64_t> offsets,
++                                     vector<uint8_t> codes,
++                                     const vector<size_t>& codes_shape) {
++  if (opts.serialized_partitioner == nullptr)
++    return FailedPreconditionError(
++        "Multi-token tokenization but no serialized partitioner is present.");
++  // Codes may be omitted (codes_shape empty) for a non-residual index, whose
++  // code does not depend on the leaf: every copy then shares the point's
++  // single row of AH_DATASET_NPY.
++  const bool has_codes = !codes_shape.empty();
++  if (opts.datapoints_by_token || opts.soar_hashed_dataset ||
++      (has_codes && opts.hashed_dataset)) {
++    return InvalidArgumentError(
++        "Multi-token assets cannot be combined with TOKENIZATION_NPY or "
++        "AH_DATASET_SOAR_NPY, and AH_DATASET_MULTI_NPY not with "
++        "AH_DATASET_NPY.");
++  }
++  if (!has_codes && !opts.hashed_dataset) {
++    return InvalidArgumentError(
++        "Multi-token tokenization without AH_DATASET_MULTI_NPY needs "
++        "AH_DATASET_NPY.");
++  }
++  if (offsets.empty() || offsets.front() != 0 ||
++      offsets.back() != static_cast<int64_t>(tokens.size())) {
++    return InvalidArgumentError(
++        "TOKENIZATION_MULTI_OFFSETS_NPY must start at 0 and end at the "
++        "number of tokens.");
++  }
++  if (has_codes && codes_shape[0] != tokens.size()) {
++    return InvalidArgumentError(
++        "AH_DATASET_MULTI_NPY must have one row per (datapoint, token) pair.");
++  }
++  const size_t n = offsets.size() - 1;
++  const int32_t n_tokens = opts.serialized_partitioner->n_tokens();
++  opts.datapoints_by_token =
++      std::make_shared<vector<std::vector<DatapointIndex>>>(n_tokens);
++  for (size_t i = 0; i < n; ++i) {
++    if (offsets[i + 1] <= offsets[i]) {
++      return InvalidArgumentError(absl::StrCat(
++          "Datapoint ", i, " has no tokens in TOKENIZATION_MULTI_NPY."));
++    }
++    for (int64_t j = offsets[i]; j < offsets[i + 1]; ++j) {
++      const int32_t token = tokens[j];
++      if (token < 0 || token >= n_tokens) {
++        return InvalidArgumentError(
++            absl::StrCat("Token ", token, " of datapoint ", i,
++                         " is out of range [0, ", n_tokens, ")."));
++      }
++      opts.datapoints_by_token->at(token).push_back(i);
++    }
++  }
++  if (!has_codes) {
++    if (opts.hashed_dataset->size() != n) {
++      return InvalidArgumentError(
++          "AH_DATASET_NPY must have one row per datapoint.");
++    }
++    return OkStatus();
++  }
++  auto multi = std::make_shared<MultiTokenHashedDataset>();
++  multi->codes =
++      std::make_unique<DenseDataset<uint8_t>>(std::move(codes), tokens.size());
++  const size_t code_len = multi->codes->dimensionality();
++
++  vector<uint8_t> primary(n * code_len);
++  for (size_t i = 0; i < n; ++i) {
++    DatapointPtr<uint8_t> row = (*multi->codes)[offsets[i]];
++    std::copy(row.values(), row.values() + code_len,
++              primary.begin() + i * code_len);
++  }
++  opts.hashed_dataset =
++      std::make_shared<DenseDataset<uint8_t>>(std::move(primary), n);
++  multi->tokens = std::move(tokens);
++  multi->offsets = std::move(offsets);
++  opts.multi_token_hashed_dataset = std::move(multi);
++  return OkStatus();
++}
++
+ }  // namespace
+ 
+ StatusOr<ScannInterface::ScannArtifacts> ScannInterface::LoadArtifacts(
+@@ -112,6 +192,12 @@ StatusOr<ScannInterface::ScannArtifacts> ScannInterface::LoadArtifacts(
+ 
+   shared_ptr<DenseDataset<float>> dataset;
+   auto fp = make_shared<PreQuantizedFixedPoint>();
++  bool has_multi_tokens = false, has_multi_offsets = false,
++       has_multi_codes = false;
++  vector<int32_t> multi_tokens;
++  vector<int64_t> multi_offsets;
++  vector<uint8_t> multi_codes;
++  vector<size_t> multi_codes_shape;
+   for (const ScannAsset& asset : assets.assets()) {
+     const string_view asset_path = asset.asset_path();
+     switch (asset.asset_type()) {
+@@ -193,6 +279,33 @@ StatusOr<ScannInterface::ScannArtifacts> ScannInterface::LoadArtifacts(
+             make_shared<vector<float>>(std::move(vector_and_shape.first));
+         break;
+       }
++      case ScannAsset::TOKENIZATION_MULTI_NPY: {
++        SCANN_ASSIGN_OR_RETURN(auto vector_and_shape,
++                               NumpyToVectorAndShape<int32_t>(asset_path));
++        multi_tokens = std::move(vector_and_shape.first);
++        has_multi_tokens = true;
++        break;
++      }
++      case ScannAsset::TOKENIZATION_MULTI_OFFSETS_NPY: {
++        auto as_int64 = NumpyToVectorAndShape<int64_t>(asset_path);
++        if (as_int64.ok()) {
++          multi_offsets = std::move(as_int64->first);
++        } else {
++          SCANN_ASSIGN_OR_RETURN(auto as_int32,
++                                 NumpyToVectorAndShape<int32_t>(asset_path));
++          multi_offsets.assign(as_int32.first.begin(), as_int32.first.end());
++        }
++        has_multi_offsets = true;
++        break;
++      }
++      case ScannAsset::AH_DATASET_MULTI_NPY: {
++        SCANN_ASSIGN_OR_RETURN(auto vector_and_shape,
++                               NumpyToVectorAndShape<uint8_t>(asset_path));
++        multi_codes = std::move(vector_and_shape.first);
++        multi_codes_shape = std::move(vector_and_shape.second);
++        has_multi_codes = true;
++        break;
++      }
+       case ScannAsset::BF16_DATASET_NPY: {
+         SCANN_ASSIGN_OR_RETURN(auto vector_and_shape,
+                                NumpyToVectorAndShape<int16_t>(asset_path));
+@@ -204,6 +317,16 @@ StatusOr<ScannInterface::ScannArtifacts> ScannInterface::LoadArtifacts(
+         break;
+     }
+   }
++  if (has_multi_tokens || has_multi_offsets || has_multi_codes) {
++    if (!(has_multi_tokens && has_multi_offsets)) {
++      return InvalidArgumentError(
++          "TOKENIZATION_MULTI_NPY and TOKENIZATION_MULTI_OFFSETS_NPY must be "
++          "given together.");
++    }
++    SCANN_RETURN_IF_ERROR(AddMultiTokenizationToOptions(
++        opts, std::move(multi_tokens), std::move(multi_offsets),
++        std::move(multi_codes), multi_codes_shape));
++  }
+   if (fp->fixed_point_dataset != nullptr) {
+     if (fp->squared_l2_norm_by_datapoint == nullptr)
+       fp->squared_l2_norm_by_datapoint = make_shared<vector<float>>();
+diff --git a/scann/scann/scann_ops/scann_assets.proto b/scann/scann/scann_ops/scann_assets.proto
+index c54ad38..5629853 100644
+--- a/scann/scann/scann_ops/scann_assets.proto
++++ b/scann/scann/scann_ops/scann_assets.proto
+@@ -39,6 +39,20 @@ message ScannAsset {
+     INT8_MULTIPLIERS_NPY = 13;
+     INT8_NORMS_NPY = 14;
+     BF16_DATASET_NPY = 15;
++
++    // Multi-token spilling (opt-in; replaces TOKENIZATION_NPY, AH_DATASET_NPY
++    // and AH_DATASET_SOAR_NPY when present).  A datapoint may be stored in
++    // any number >= 1 of partitions, each copy with its own AH code:
++    //   TOKENIZATION_MULTI_NPY:         int32 [nnz], the partitions of each
++    //                                   datapoint (CSR values; the first token
++    //                                   of a datapoint is its primary).
++    //   TOKENIZATION_MULTI_OFFSETS_NPY: int64 or int32 [n + 1], CSR offsets.
++    //   AH_DATASET_MULTI_NPY:           uint8 [nnz, code_len], the AH code of
++    //                                   each (datapoint, token) pair, in the
++    //                                   same flat order as the tokens.
++    TOKENIZATION_MULTI_NPY = 17;
++    TOKENIZATION_MULTI_OFFSETS_NPY = 18;
++    AH_DATASET_MULTI_NPY = 19;
+   }
+ 
+   AssetType asset_type = 1;
+diff --git a/scann/scann/tree_x_hybrid/internal/utils.cc b/scann/scann/tree_x_hybrid/internal/utils.cc
+index 31b1ec5..999f431 100644
+--- a/scann/scann/tree_x_hybrid/internal/utils.cc
++++ b/scann/scann/tree_x_hybrid/internal/utils.cc
+@@ -22,6 +22,7 @@
+ #include <x86intrin.h>
+ #endif
+ 
++#include <algorithm>
+ #include <cstdint>
+ 
+ #include "scann/utils/common.h"
+@@ -60,7 +61,7 @@ SCANN_AVX2_OUTLINE size_t Avx2GatherCreateLeafLocalAllowlist(
+ 
+ StatusOr<bool> ValidateDatapointsByToken(
+     absl::Span<const std::vector<DatapointIndex>> datapoints_by_token,
+-    DatapointIndex num_datapoints) {
++    DatapointIndex num_datapoints, bool allow_more_than_two_copies) {
+   bool is_disjoint = true;
+ 
+   vector<bool> global_bitmap(num_datapoints, false);
+@@ -83,7 +84,7 @@ StatusOr<bool> ValidateDatapointsByToken(
+       }
+       if (global_bitmap[dp_index]) {
+         is_disjoint = false;
+-        if (seen_twice[dp_index]) {
++        if (seen_twice[dp_index] && !allow_more_than_two_copies) {
+           return InvalidArgumentError(
+               StrCat("Datapoint ", dp_index,
+                      " represented more than twice in datapoints_by_token.  "
+@@ -161,6 +162,43 @@ void DeduplicateDatabaseSpilledResults(NNResultsVector* results,
+       results, final_size);
+ }
+ 
++void DeduplicateDatabaseSpilledResults(NNResultsVector* results,
++                                       size_t final_size,
++                                       int multi_spill_dedup) {
++  if (multi_spill_dedup == kMultiSpillDedupStock) {
++    DeduplicateDatabaseSpilledResults(results, final_size);
++    return;
++  }
++  DCHECK_GT(final_size, 0);
++  flat_hash_map<DatapointIndex, pair<float, uint32_t>> map;
++  map.reserve(results->size());
++  for (const auto& neighbor : *results) {
++    auto [it, was_inserted] =
++        map.try_emplace(neighbor.first, neighbor.second, 1u);
++    if (!was_inserted) {
++      if (multi_spill_dedup == kMultiSpillDedupMin) {
++        it->second.first = std::min(it->second.first, neighbor.second);
++      } else if (multi_spill_dedup == kMultiSpillDedupMax) {
++        it->second.first = std::max(it->second.first, neighbor.second);
++      } else {
++        it->second.first += neighbor.second;
++        it->second.second++;
++      }
++    }
++  }
++  size_t k = 0;
++  for (const auto& [dp_idx, sum_and_count] : map) {
++    (*results)[k++] = {dp_idx, sum_and_count.first / sum_and_count.second};
++  }
++  results->resize(k);
++  if (results->size() > final_size) {
++    NthElementBranchOptimized(results->begin(),
++                              results->begin() + final_size - 1, results->end(),
++                              DistanceComparatorBranchOptimized());
++    results->resize(final_size);
++  }
++}
++
+ namespace tree_ah_utils_internal {
+ 
+ StatusOr<SingleMachineFactoryOptions> FinishMergeAHLeafOptions(
+diff --git a/scann/scann/tree_x_hybrid/internal/utils.h b/scann/scann/tree_x_hybrid/internal/utils.h
+index a7f8d72..59f5846 100644
+--- a/scann/scann/tree_x_hybrid/internal/utils.h
++++ b/scann/scann/tree_x_hybrid/internal/utils.h
+@@ -135,7 +135,7 @@ StatusOr<SingleMachineFactoryOptions> MergeAHLeafOptions(
+ 
+ StatusOr<bool> ValidateDatapointsByToken(
+     absl::Span<const std::vector<DatapointIndex>> datapoints_by_token,
+-    DatapointIndex num_datapoints);
++    DatapointIndex num_datapoints, bool allow_more_than_two_copies = false);
+ 
+ vector<uint32_t> SizeByPartition(
+     ConstSpan<std::vector<DatapointIndex>> datapoints_by_token);
+@@ -143,6 +143,17 @@ vector<uint32_t> SizeByPartition(
+ void DeduplicateDatabaseSpilledResults(NNResultsVector* results,
+                                        size_t final_size);
+ 
++enum : int {
++  kMultiSpillDedupStock = 0,
++  kMultiSpillDedupMean = 1,
++  kMultiSpillDedupMin = 2,
++  kMultiSpillDedupMax = 3,
++};
++
++void DeduplicateDatabaseSpilledResults(NNResultsVector* results,
++                                       size_t final_size,
++                                       int multi_spill_dedup);
++
+ inline int32_t SafeIntFloatMul(int32_t x, float f) {
+   const double result = static_cast<double>(x) * static_cast<double>(f);
+   if (ABSL_PREDICT_FALSE(result >
+diff --git a/scann/scann/tree_x_hybrid/tree_ah_hybrid_residual.cc b/scann/scann/tree_x_hybrid/tree_ah_hybrid_residual.cc
+index eddc6ad..fda59b9 100644
+--- a/scann/scann/tree_x_hybrid/tree_ah_hybrid_residual.cc
++++ b/scann/scann/tree_x_hybrid/tree_ah_hybrid_residual.cc
+@@ -19,6 +19,7 @@
+ #include <algorithm>
+ #include <cmath>
+ #include <cstdint>
++#include <cstdlib>
+ #include <functional>
+ #include <memory>
+ #include <numeric>
+@@ -26,6 +27,7 @@
+ #include <utility>
+ 
+ #include "absl/flags/flag.h"
++#include "absl/strings/string_view.h"
+ #include "absl/status/status.h"
+ #include "absl/time/clock.h"
+ #include "absl/time/time.h"
+@@ -358,13 +360,35 @@ Status TreeAHHybridResidual::BuildLeafSearchers(
+     leaf_size_upper_bound_ =
+         std::max<uint32_t>(leaf_size_upper_bound_, vec.size());
+   }
++  const MultiTokenHashedDataset* multi_token_hashed_dataset =
++      opts.multi_token_hashed_dataset;
+   SCANN_ASSIGN_OR_RETURN(
+       datapoints_by_token_disjoint_,
+-      ValidateDatapointsByToken(datapoints_by_token, num_datapoints_));
++      ValidateDatapointsByToken(datapoints_by_token, num_datapoints_,
++                                multi_token_hashed_dataset != nullptr));
++  multi_spill_dedup_ = kMultiSpillDedupStock;
++  if (multi_token_hashed_dataset != nullptr && !datapoints_by_token_disjoint_) {
++    multi_spill_dedup_ = kMultiSpillDedupMean;
++    const char* mode = std::getenv("SCANN_MULTI_SPILL_DEDUP");
++    if (mode != nullptr && absl::string_view(mode) == "min") {
++      multi_spill_dedup_ = kMultiSpillDedupMin;
++    } else if (mode != nullptr && absl::string_view(mode) == "max") {
++      multi_spill_dedup_ = kMultiSpillDedupMax;
++    }
++    LOG(INFO) << "Multi-token spilling: de-duplicating copies by "
++              << (multi_spill_dedup_ == kMultiSpillDedupMin   ? "min"
++                  : multi_spill_dedup_ == kMultiSpillDedupMax ? "max"
++                                                              : "mean")
++              << " distance.";
++  }
+ 
+   const DenseDataset<uint8_t>* hashed_dataset = opts.hashed_dataset;
+   const DenseDataset<uint8_t>* soar_hashed_dataset = opts.soar_hashed_dataset;
+-  if (hashed_dataset && !soar_hashed_dataset &&
++  if (multi_token_hashed_dataset && !hashed_dataset) {
++    return InvalidArgumentError(
++        "multi_token_hashed_dataset requires hashed_dataset to be set.");
++  }
++  if (hashed_dataset && !soar_hashed_dataset && !multi_token_hashed_dataset &&
+       !datapoints_by_token_disjoint_) {
+     return InvalidArgumentError(
+         "If hashed_dataset is set and SOAR database spilling is enabled, "
+@@ -381,6 +405,13 @@ Status TreeAHHybridResidual::BuildLeafSearchers(
+       get_hashed_datapoint = [hashed_dataset](DatapointIndex i, int32_t token,
+                                               Datapoint<uint8_t>* storage)
+           -> StatusOr<DatapointPtr<uint8_t>> { return (*hashed_dataset)[i]; };
++    } else if (multi_token_hashed_dataset) {
++      get_hashed_datapoint =
++          [multi_token_hashed_dataset](
++              DatapointIndex i, int32_t token,
++              Datapoint<uint8_t>* storage) -> StatusOr<DatapointPtr<uint8_t>> {
++        return multi_token_hashed_dataset->Get(i, token);
++      };
+     } else {
+       get_hashed_datapoint =
+           [hashed_dataset, soar_hashed_dataset](
+@@ -779,7 +810,8 @@ Status TreeAHHybridResidual::FindNeighborsBatchedImpl(
+       if (!datapoints_by_token_disjoint_) {
+         DeduplicateDatabaseSpilledResults(
+             &results[query_index],
+-            params[query_index].pre_reordering_num_neighbors());
++            params[query_index].pre_reordering_num_neighbors(),
++            multi_spill_dedup_);
+       }
+     }
+     return OkStatus();
+@@ -839,7 +871,8 @@ Status TreeAHHybridResidual::FindNeighborsBatchedImpl(
+     if (!datapoints_by_token_disjoint_) {
+       DeduplicateDatabaseSpilledResults(
+           &results[query_index],
+-          params[query_index].pre_reordering_num_neighbors());
++          params[query_index].pre_reordering_num_neighbors(),
++          multi_spill_dedup_);
+     }
+   }
+   return OkStatus();
+@@ -959,7 +992,8 @@ Status TreeAHHybridResidual::FindNeighborsInternal1(
+     }
+     if (!datapoints_by_token_disjoint_) {
+       DeduplicateDatabaseSpilledResults(result,
+-                                        params.pre_reordering_num_neighbors());
++                                        params.pre_reordering_num_neighbors(),
++                                        multi_spill_dedup_);
+     }
+     return OkStatus();
+   } else {
+@@ -971,7 +1005,8 @@ Status TreeAHHybridResidual::FindNeighborsInternal1(
+         result, std::move(lookup_table)));
+     if (!datapoints_by_token_disjoint_) {
+       DeduplicateDatabaseSpilledResults(result,
+-                                        params.pre_reordering_num_neighbors());
++                                        params.pre_reordering_num_neighbors(),
++                                        multi_spill_dedup_);
+     }
+     return OkStatus();
+   }
+diff --git a/scann/scann/tree_x_hybrid/tree_ah_hybrid_residual.h b/scann/scann/tree_x_hybrid/tree_ah_hybrid_residual.h
+index 73f7b97..197a31a 100644
+--- a/scann/scann/tree_x_hybrid/tree_ah_hybrid_residual.h
++++ b/scann/scann/tree_x_hybrid/tree_ah_hybrid_residual.h
+@@ -27,6 +27,7 @@
+ #include "scann/base/health_stats_collector.h"
+ #include "scann/base/search_parameters.h"
+ #include "scann/base/single_machine_base.h"
++#include "scann/base/single_machine_factory_options.h"
+ #include "scann/data_format/datapoint.h"
+ #include "scann/data_format/dataset.h"
+ #include "scann/hashes/asymmetric_hashing2/querying.h"
+@@ -67,6 +68,8 @@ class TreeAHHybridResidual final : public SingleMachineSearcherBase<float> {
+ 
+     const DenseDataset<uint8_t>* soar_hashed_dataset = nullptr;
+ 
++    const MultiTokenHashedDataset* multi_token_hashed_dataset = nullptr;
++
+     ThreadPool* pool = nullptr;
+   };
+ 
+@@ -148,7 +151,6 @@ class TreeAHHybridResidual final : public SingleMachineSearcherBase<float> {
+   }
+   void set_spilling_overretrieve_factor(float factor) {
+     DCHECK_GE(factor, 1.0);
+-    DCHECK_LE(factor, 2.0);
+     spilling_overretrieve_factor_ = factor;
+   }
+ 
+@@ -315,6 +317,8 @@ class TreeAHHybridResidual final : public SingleMachineSearcherBase<float> {
+ 
+   bool datapoints_by_token_disjoint_ = true;
+ 
++  int multi_spill_dedup_ = kMultiSpillDedupStock;
++
+   bool enable_global_topn_ = false;
+ 
+   float spilling_overretrieve_factor_ = 2.0f;
+diff --git a/scann/scann/tree_x_hybrid/tree_x_hybrid_smmd.cc b/scann/scann/tree_x_hybrid/tree_x_hybrid_smmd.cc
+index e241729..285462e 100644
+--- a/scann/scann/tree_x_hybrid/tree_x_hybrid_smmd.cc
++++ b/scann/scann/tree_x_hybrid/tree_x_hybrid_smmd.cc
+@@ -168,7 +168,8 @@ Status TreeXHybridSMMD<T>::BuildLeafSearchers(
+                          this->DatasetSize());
+   SCANN_ASSIGN_OR_RETURN(
+       datapoints_by_token_disjoint_,
+-      ValidateDatapointsByToken(datapoints_by_token, dataset_size));
++      ValidateDatapointsByToken(datapoints_by_token, dataset_size,
++                                /*allow_more_than_two_copies=*/true));
+ 
+   const TypedDataset<T>* dataset = this->dataset();
+   const DenseDataset<uint8_t>* hashed_dataset = this->hashed_dataset();
+@@ -235,7 +236,8 @@ Status TreeXHybridSMMD<T>::BuildBFloat16BruteForceLeafSearchers(
+     const DatapointIndex dataset_size = bfloat16_database.size();
+     SCANN_ASSIGN_OR_RETURN(
+         datapoints_by_token_disjoint_,
+-        ValidateDatapointsByToken(datapoints_by_token, dataset_size));
++        ValidateDatapointsByToken(datapoints_by_token, dataset_size,
++                                /*allow_more_than_two_copies=*/true));
+ 
+     const DatapointIndex n_tokens = datapoints_by_token.size();
+     leaf_searchers_.resize(n_tokens);
+@@ -352,7 +354,8 @@ Status TreeXHybridSMMD<T>::BuildPretrainedScalarQuantizationLeafSearchers(
+   }
+   SCANN_ASSIGN_OR_RETURN(
+       datapoints_by_token_disjoint_,
+-      ValidateDatapointsByToken(datapoints_by_token, num_datapoints_));
++      ValidateDatapointsByToken(datapoints_by_token, num_datapoints_,
++                                /*allow_more_than_two_copies=*/true));
+ 
+   const auto n_tokens = datapoints_by_token.size();
+   leaf_searchers_.resize(n_tokens);

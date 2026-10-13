@@ -1,0 +1,14 @@
+QA-ScaNN
+Copyright 2026 The QA-ScaNN Authors
+
+This product includes ScaNN (third_party/scann), the scann/ directory of
+https://github.com/google-research/google-research at commit 634a79f,
+Copyright Google LLC, licensed under the Apache License, Version 2.0, with
+modifications (third_party/scann-multi-token.patch). The modified files
+remain under that license.
+
+src/qa_scann/_core.cpp contains:
+  - a port of the query-aware placement greedy of qa-ivf
+    (faiss/impl/QueryAwarePlacement.cpp, MIT License);
+  - a reimplementation of ScaNN's anisotropic AH encoder
+    (scann/hashes/internal/asymmetric_hashing_impl.cc, Apache License 2.0).

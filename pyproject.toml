@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64", "wheel", "pybind11>=2.10"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qa-scann"
+version = "0.1.0"
+description = "ScaNN with query-aware placement: extra copies of points in the leaves that sampled queries probe"
+readme = "README.md"
+requires-python = ">=3.9,<3.14"
+license = {text = "Apache-2.0"}
+dependencies = ["numpy>=1.22", "protobuf"]
+# The patched ScaNN (scann 1.4.2+qa1, vendored in third_party/scann) is a
+# separate build: scripts/build_scann.sh
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
