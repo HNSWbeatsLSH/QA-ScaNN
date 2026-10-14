@@ -3,8 +3,8 @@
 
     python tools/vibe_summary.py VIBE_DIR DATASET [DATASET ...] [--targets 0.9 0.95]
 
-VIBE_DIR is a VIBE checkout after `python3 run.py --dataset DATASET --algorithm
-qa-scann` (results in results/DATASET/100/qa-scann/, ground truth in
+VIBE_DIR is a VIBE checkout after `python3 run.py --dataset DATASET --module
+qa_scann` (results in results/DATASET/100/qa-scann*/, ground truth in
 data/DATASET.hdf5). For each centroid source it prints the highest QPS that
 reaches each recall@100 target and the build that reached it, plus build times
 and copies per point.
@@ -22,7 +22,7 @@ def summarise(vibe_dir, ds, targets):
     with h5py.File(os.path.join(vibe_dir, "data", ds + ".hdf5"), "r") as f:
         gt = np.asarray(f["neighbors"][:, :100])
     best, builds = {}, {}
-    for fn in sorted(glob.glob(os.path.join(vibe_dir, "results", ds, "100", "qa-scann", "*.hdf5"))):
+    for fn in sorted(glob.glob(os.path.join(vibe_dir, "results", ds, "100", "qa-scann*", "*.hdf5"))):
         if not os.path.exists(fn + ".complete"):
             continue
         with h5py.File(fn, "r") as h:

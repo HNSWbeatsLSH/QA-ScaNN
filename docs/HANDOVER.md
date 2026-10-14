@@ -93,7 +93,10 @@ Decisions made along the way:
 
 ### VIBE adapter
 
-`QAScaNN(metric, p, alpha, centroids)` maps VIBE's metrics as follows:
+`QAScaNN(metric, centroids, num_leaves, p, dims_per_block, alpha)` maps VIBE's
+metrics as follows. (`vibe/pilot/config.yml` was written for the v0.1.0
+adapter, `QAScaNN(metric, p, alpha, centroids)`; run it with that tag's
+`vibe/qa_scann/module.py`.)
 
 | metric | ScaNN distance |
 |---|---|

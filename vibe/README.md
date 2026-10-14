@@ -7,8 +7,8 @@ asks for, ready to be copied to `vibe/algorithms/qa_scann/` of a VIBE checkout.
 | file | contents |
 |---|---|
 | `image.def` | builds on `base.sif`: installs Clang 19, clones this repository, builds the vendored patched ScaNN (`third_party/scann`) with `scripts/build_scann.sh`, then `pip install`s this package |
-| `module.py` | `QAScaNN(BaseANN)`, with `__init__(metric, p, alpha, centroids)`, `fit_ood`, `set_query_arguments(leaves_to_search, reorder)`, `query`, `batch_query`, `get_additional` and `__str__` |
-| `config.yml` | `ood: true`, distance `any`; 18 builds and 54 search settings (`leaves_to_search` x `reorder`) each. The builds are two run groups: data centroids with `p` {1,2,4,8,16} x `alpha` {0.9,0.99} (10), and query centroids with `p` {1,2,4,8} x `alpha` (8) |
+| `module.py` | `QAScaNN(BaseANN)`, with `__init__(metric, centroids, num_leaves, p, dims_per_block, alpha)`, `fit_ood`, `set_query_arguments(leaves_to_search, reorder)`, `query`, `batch_query`, `get_additional` and `__str__` |
+| `config.yml` | `ood: true`, distance `any`. Two algorithms that differ only in the centroid source: `qa-scann-data` and `qa-scann-queries`. Each has one run group per `num_leaves` L {512,1024,2048} x `p` {1,2,4}, building `dims_per_block` {1,2,4} at `alpha` 0.9 (27 builds per algorithm). Each build searches `leaves_to_search` = powers of 2 from p to L/8 (VIBE's ScaNN goes up to L/8 too) x `reorder` {100,200,300,400,600,800,1000}: 35 to 63 settings per build |
 
 **Out-of-distribution datasets only.** The placement needs learning queries,
 which VIBE passes (`fit_ood(X_train, X_learn, X_learn_neighbors)`) only on
@@ -56,7 +56,10 @@ one thread, and the placement and encoder are serial.
 
    ```sh
    ./install.sh --algorithm qa_scann
-   python3 run.py --dataset llama-128-ip --algorithm qa-scann
+   python3 run.py --dataset llama-128-ip --module qa_scann
    ```
+
+   `--module qa_scann` runs both algorithms; `--algorithm qa-scann-data` (or
+   `qa-scann-queries`) runs one.
 
 5. **Open the pull request.**
