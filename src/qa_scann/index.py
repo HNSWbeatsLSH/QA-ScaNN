@@ -116,6 +116,10 @@ class QAScaNN:
         ScaNN's AH and tree settings (defaults: 2, 0.2, 250,000).
     demand_k : int
         Neighbours per learning query that count as demand (recall@k target).
+    max_mean_copies : float or None
+        Cap on the mean copies per point (home copy included): the placement
+        stops at whichever comes first, alpha coverage or (cap - 1) * n extra
+        copies. None = no cap.
     training_threads : int
         Threads for ScaNN's tree and codebook training (the placement and the
         encoder are single-threaded).
@@ -123,7 +127,7 @@ class QAScaNN:
 
     def __init__(self, distance="squared_l2", p=4, alpha=0.9, centroids="data", num_leaves=None,
                  dims_per_block=2, anisotropic_quantization_threshold=0.2,
-                 training_sample_size=250_000, demand_k=100, training_threads=1):
+                 training_sample_size=250_000, demand_k=100, training_threads=1, max_mean_copies=None):
         if distance not in ("squared_l2", "dot_product"):
             raise ValueError("distance must be 'squared_l2' or 'dot_product'")
         if centroids not in ("data", "queries"):
@@ -132,6 +136,8 @@ class QAScaNN:
             raise ValueError("alpha must be in [0, 1]")
         if p < 1:
             raise ValueError("p must be >= 1")
+        if max_mean_copies is not None and not max_mean_copies >= 1:
+            raise ValueError("max_mean_copies must be >= 1 (or None)")
         self.distance = distance
         self.p = int(p)
         self.alpha = float(alpha)
@@ -142,6 +148,7 @@ class QAScaNN:
         self.training_sample_size = int(training_sample_size)
         self.demand_k = int(demand_k)
         self.training_threads = int(training_threads)
+        self.max_mean_copies = None if max_mean_copies is None else float(max_mean_copies)
         self.searcher = None
         self.stats = {}
         self._dir = None
@@ -282,6 +289,9 @@ class QAScaNN:
         cum = base_cov + np.concatenate([[0], np.cumsum(gains)])
         hit = np.flatnonzero(cum >= need - 1e-9)
         steps = int(hit[0]) if len(hit) else len(keys)
+        capped = False
+        if self.max_mean_copies is not None and steps > int((self.max_mean_copies - 1) * n):
+            steps, capped = int((self.max_mean_copies - 1) * n), True
         keys = keys[:steps]
         pt, lst = keys // nl, keys % nl
 
@@ -336,7 +346,7 @@ class QAScaNN:
         self.num_leaves = nl
         self.stats = {
             "n": int(n), "num_leaves": int(nl), "centroids": centroids, "p": int(p),
-            "alpha": self.alpha,
+            "alpha": self.alpha, "max_mean_copies": self.max_mean_copies, "capped": capped,
             "learning_queries": int(m), "demand_k": int(k),
             "greedy_steps": int(steps), "full_cover_steps": int(len(gains)),
             "coverage": float(cum[steps] / (m * k)) if m * k else 1.0,
@@ -347,7 +357,7 @@ class QAScaNN:
         }
         params = {k2: getattr(self, k2) for k2 in (
             "distance", "p", "alpha", "centroids", "num_leaves", "dims_per_block",
-            "anisotropic_quantization_threshold", "training_sample_size", "demand_k")}
+            "anisotropic_quantization_threshold", "training_sample_size", "demand_k", "max_mean_copies")}
         with open(os.path.join(out_dir, _META), "w") as f:
             json.dump({"params": params, "stats": self.stats, "assets": assets}, f, indent=1)
 

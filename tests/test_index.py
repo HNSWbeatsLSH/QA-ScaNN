@@ -87,3 +87,21 @@ def test_placement_beats_plain_scann_at_few_leaves():
     qa = QAScaNN(p=2, alpha=0.95, demand_k=k).fit(X, learn)
     assert plain.stats["copies_per_point"] == 1.0
     assert rec(qa.search_batched(Q, k, 2, 500)[0]) > rec(plain.search_batched(Q, k, 2, 500)[0])
+
+
+def test_mean_copies_cap(tmp_path):
+    X, learn, Q = _data(seed=2)
+    k = 10
+    free = QAScaNN(p=1, alpha=0.99, demand_k=k).fit(X, learn)
+    assert free.stats["capped"] is False and free.stats["copies_per_point"] > 1.5
+    capped = QAScaNN(p=1, alpha=0.99, demand_k=k, max_mean_copies=1.5).fit(X, learn)
+    st = capped.stats
+    assert st["capped"] is True and st["copies_per_point"] <= 1.5 + 1e-9
+    assert st["home_coverage"] <= st["coverage"] < free.stats["coverage"]
+    I, _ = capped.search_batched(Q, k, 2, 500)
+    assert all(len(set(r)) == k for r in I)
+    capped.save(str(tmp_path / "ix"))
+    again = QAScaNN.load(str(tmp_path / "ix"))
+    assert again.max_mean_copies == 1.5 and again.stats == st
+    with pytest.raises(ValueError):
+        QAScaNN(max_mean_copies=0.5)

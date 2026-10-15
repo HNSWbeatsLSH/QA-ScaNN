@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qa-scann"
-version = "0.1.0"
+version = "0.1.1"
 description = "ScaNN with query-aware placement: extra copies of points in the leaves that sampled queries probe"
 readme = "README.md"
 requires-python = ">=3.9,<3.14"

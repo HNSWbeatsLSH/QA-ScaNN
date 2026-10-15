@@ -7,8 +7,8 @@ asks for, ready to be copied to `vibe/algorithms/qa_scann/` of a VIBE checkout.
 | file | contents |
 |---|---|
 | `image.def` | builds on `base.sif`: installs Clang 19, clones this repository, builds the vendored patched ScaNN (`third_party/scann`) with `scripts/build_scann.sh`, then `pip install`s this package |
-| `module.py` | `QAScaNN(BaseANN)`, with `__init__(metric, centroids, num_leaves, p, dims_per_block, alpha)`, `fit_ood`, `set_query_arguments(leaves_to_search, reorder)`, `query`, `batch_query`, `get_additional` and `__str__` |
-| `config.yml` | `ood: true`, distance `any`. Two algorithms that differ only in the centroid source: `qa-scann-data` and `qa-scann-queries`. Each has one run group per `num_leaves` L {512,1024,2048} x `p` {1,2,4}, building `dims_per_block` {1,2,4} at `alpha` 0.9 (27 builds per algorithm). Each build searches `leaves_to_search` = powers of 2 from p to L/8 (VIBE's ScaNN goes up to L/8 too) x `reorder` {100,200,300,400,600,800,1000}: 35 to 63 settings per build |
+| `module.py` | `QAScaNN(BaseANN)`, with `__init__(metric, centroids, num_leaves, p, dims_per_block, alpha, avq_threshold, max_mean_copies=None)` (`num_leaves` None: floor(sqrt(n)); `max_mean_copies` needs qa_scann 0.1.1), `fit_ood`, `set_query_arguments(leaves_to_search, reorder)`, `query`, `batch_query`, `get_additional` and `__str__` |
+| `config.yml` | `ood: true`, distance `any`. Two algorithms that differ only in the centroid source: `qa-scann-data` and `qa-scann-queries`. `num_leaves` is `null`, so QA-ScaNN uses floor(sqrt(n)) leaves on every dataset. One run group per `p` {1,2,4}; within a group, `dims_per_block` {1,2,4} x `avq_threshold` {NaN,0.1} (ScaNN's anisotropic threshold; VIBE's ScaNN uses `dims_per_block` {2,4} and also tries 0.25, 0.4 and 0.55), at `alpha` 0.95 and `max_mean_copies` 25 (the placement stops at 25 copies per point on average): 18 builds per algorithm. Each build searches `leaves_to_search` = powers of 2 from p to 128 x VIBE's ScaNN `reorder` {100,200,300,400,600,800,1000}: 42 to 56 settings per build, 882 per algorithm |
 
 **Out-of-distribution datasets only.** The placement needs learning queries,
 which VIBE passes (`fit_ood(X_train, X_learn, X_learn_neighbors)`) only on
@@ -22,9 +22,15 @@ use ScaNN's index as follows:
 
 | metric | ScaNN index | codes |
 |---|---|---|
-| `normalized` | squared L2 | non-residual; a point's copies share its code |
-| `cosine` | squared L2, after normalising the vectors in `fit_ood` and each query in `query` | non-residual; a point's copies share its code |
+| `normalized` | dot product | residual; each copy is encoded against its own leaf centre |
+| `cosine` | dot product, after normalising the vectors in `fit_ood` and each query in `query` | residual; each copy is encoded against its own leaf centre |
 | `ip` | dot product | residual; each copy is encoded against its own leaf centre |
+| `euclidean` | squared L2 (VIBE has no OOD Euclidean set) | non-residual; a point's copies share its code |
+
+On unit vectors the dot product ranks like squared L2, but with a tree ScaNN gives
+the dot-product index residual codes (each point stored relative to its leaf
+centre), which are much more accurate. On imagenet-align (num_leaves 1024,
+p 2) this took QA-ScaNN from 92-189 to 6,980 QPS at recall@100 0.9.
 
 **Centroids.** `centroids` selects what ScaNN's k-means tree is trained on:
 `data` (the dataset points, ScaNN's default) or `queries` (`X_learn`). With
@@ -36,7 +42,7 @@ one thread, and the placement and encoder are serial.
 
 ## Submitting
 
-1. **Tag this repository.** Push it to GitHub, tag the release (`v0.1.0`), and
+1. **Tag this repository.** Push it to GitHub, tag the release (`v0.1.1`), and
    set `QA_SCANN_REPO` and `QA_SCANN_REF` at the top of
    `qa_scann/image.def` to match.
 2. **Add the files to VIBE.** In a fork of VIBE, copy the folder:
@@ -49,7 +55,7 @@ one thread, and the placement and encoder are serial.
    table, alphabetically between PyNNDescent and RoarGraph:
 
    ```
-   | [QA-ScaNN](https://github.com/HNSWbeatsLSH/QA-ScaNN) | 0.1.0 |
+   | [QA-ScaNN](https://github.com/HNSWbeatsLSH/QA-ScaNN) | 0.1.1 |
    ```
 
 4. **Build and run** (Apptainer or Singularity needed):

@@ -93,14 +93,14 @@ Decisions made along the way:
 
 ### VIBE adapter
 
-`QAScaNN(metric, centroids, num_leaves, p, dims_per_block, alpha)` maps VIBE's
+`QAScaNN(metric, centroids, num_leaves, p, dims_per_block, alpha, avq_threshold)` maps VIBE's
 metrics as follows. (`vibe/pilot/config.yml` was written for the v0.1.0
 adapter, `QAScaNN(metric, p, alpha, centroids)`; run it with that tag's
 `vibe/qa_scann/module.py`.)
 
 | metric | ScaNN distance |
 |---|---|
-| `normalized`, `cosine` (rows and queries normalised) | squared L2 |
+| `normalized`, `cosine` (rows and queries normalised) | dot product (residual codes; squared L2 until 2026-10-15, whose non-residual codes were far less accurate) |
 | `ip` | dot product |
 | `euclidean` | squared L2 (supported, but VIBE has no OOD Euclidean set) |
 

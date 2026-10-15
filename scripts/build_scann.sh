@@ -17,6 +17,9 @@ set -euo pipefail
 
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 PYTHON=${PYTHON:-python3}
+# resolve now: the build venv is put first on PATH below, where a bare
+# `python`/`python3` would name the venv's interpreter instead
+PYTHON=$(command -v "$PYTHON") || { echo "PYTHON not found" >&2; exit 1; }
 INSTALL=1
 WHEEL_DIR=""
 while [ $# -gt 0 ]; do
