@@ -39,32 +39,3 @@ AH codebook on the resulting partition.
 
 **Builds** are single-threaded, as VIBE requires: ScaNN's training runs with
 one thread, and the placement and encoder are serial.
-
-## Submitting
-
-1. **Tag this repository.** Push it to GitHub, tag the release (`v0.1.1`), and
-   set `QA_SCANN_REPO` and `QA_SCANN_REF` at the top of
-   `qa_scann/image.def` to match.
-2. **Add the files to VIBE.** In a fork of VIBE, copy the folder:
-
-   ```sh
-   cp -r qa_scann <vibe>/vibe/algorithms/qa_scann
-   ```
-
-3. **Add the README row.** In VIBE's README, add a row to the *Algorithms*
-   table, alphabetically between PyNNDescent and RoarGraph:
-
-   ```
-   | [QA-ScaNN](https://github.com/HNSWbeatsLSH/QA-ScaNN) | 0.1.1 |
-   ```
-
-4. **Build and run** (Apptainer or Singularity needed):
-
-   ```sh
-   ./install.sh --algorithm qa_scann
-   python3 run.py --dataset llama-128-ip --module qa_scann
-   ```
-
-   `--module qa_scann` and `--algorithm qa-scann` are equivalent here.
-
-5. **Open the pull request.**
