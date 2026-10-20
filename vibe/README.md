@@ -8,7 +8,7 @@ asks for, ready to be copied to `vibe/algorithms/qa_scann/` of a VIBE checkout.
 |---|---|
 | `image.def` | builds on `base.sif`: installs Clang 19, clones this repository, builds the vendored patched ScaNN (`third_party/scann`) with `scripts/build_scann.sh`, then `pip install`s this package |
 | `module.py` | `QAScaNN(BaseANN)`, with `__init__(metric, centroids, num_leaves, p, dims_per_block, alpha, avq_threshold, max_mean_copies=None)` (`num_leaves` None: floor(sqrt(n)); `max_mean_copies` needs qa_scann 0.1.1), `fit_ood`, `set_query_arguments(leaves_to_search, reorder)`, `query`, `batch_query`, `get_additional` and `__str__` |
-| `config.yml` | `ood: true`, distance `any`. Two algorithms that differ only in the centroid source: `qa-scann-data` and `qa-scann-queries`. `num_leaves` is `null`, so QA-ScaNN uses floor(sqrt(n)) leaves on every dataset. One run group per `p` {1,2,4}; within a group, `dims_per_block` {1,2,4} x `avq_threshold` {NaN,0.1} (ScaNN's anisotropic threshold; VIBE's ScaNN uses `dims_per_block` {2,4} and also tries 0.25, 0.4 and 0.55), at `alpha` 0.95 and `max_mean_copies` 25 (the placement stops at 25 copies per point on average): 18 builds per algorithm. Each build searches `leaves_to_search` = powers of 2 from p to 128 x VIBE's ScaNN `reorder` {100,200,300,400,600,800,1000}: 42 to 56 settings per build, 882 per algorithm |
+| `config.yml` | `ood: true`, distance `any`. One algorithm, `qa-scann`, with data centroids (k-means trained on the dataset; query centroids were measured and lost almost everywhere). `num_leaves` is `null`, so QA-ScaNN uses floor(sqrt(n)) leaves on every dataset. One run group per `p` {1,2,4}; within a group, `dims_per_block` {1,2,4} x `avq_threshold` {NaN,0.1} (ScaNN's anisotropic threshold), at `alpha` 0.95 and `max_mean_copies` 25 (the placement stops at 25 copies per point on average): 18 builds. Each build searches `leaves_to_search` = powers of 2 from p to 128 x VIBE's ScaNN `reorder` {100,200,300,400,600,800,1000}: 42 to 56 settings per build, 882 in total |
 
 **Out-of-distribution datasets only.** The placement needs learning queries,
 which VIBE passes (`fit_ood(X_train, X_learn, X_learn_neighbors)`) only on
@@ -65,7 +65,8 @@ one thread, and the placement and encoder are serial.
    python3 run.py --dataset llama-128-ip --module qa_scann
    ```
 
-   `--module qa_scann` runs both algorithms; `--algorithm qa-scann-data` (or
-   `qa-scann-queries`) runs one.
+   `--module qa_scann` and `--algorithm qa-scann` are equivalent here.
+   `docs/VIBE_RUN_AND_SUBMISSION.md` has the results of a full run on all 8 OOD
+   datasets.
 
 5. **Open the pull request.**
