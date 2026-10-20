@@ -66,7 +66,5 @@ one thread, and the placement and encoder are serial.
    ```
 
    `--module qa_scann` and `--algorithm qa-scann` are equivalent here.
-   `docs/VIBE_RUN_AND_SUBMISSION.md` has the results of a full run on all 8 OOD
-   datasets.
 
 5. **Open the pull request.**
